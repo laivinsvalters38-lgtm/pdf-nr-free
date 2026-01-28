@@ -35,15 +35,68 @@ def extract_points_from_text(text: str, x_min: float, x_max: float, y_min: float
     )
     return df
 
-def find_free_numbers(used, how_many=50):
-    used = set(used)
-    free = []
-    n = 1
-    while len(free) < how_many:
-        if n not in used:
-            free.append(n)
-        n += 1
-    return free
+def extract_points_from_text(text: str, x_min: float, x_max: float, y_min: float, y_max: float, nr_max: int):
+    """
+    2 režīmi:
+    A) Ja tekstā ir 'ROBEŽPUNKTU KOORDINĀTAS' -> kolonnu režīms (Nr saraksts + X saraksts + Y saraksts)
+    B) Citādi -> vecais "rindu regex" režīms
+    """
+
+    # ---------- A) KOLONNU REŽĪMS ----------
+    key = "ROBEŽPUNKTU KOORDINĀTAS"
+    if key in text:
+        sec = text.split(key, 1)[1]
+
+        # 1) atrodam pirmo decimālskaitli -> līdz tam krājam Nr kandidātus
+        first_float = re.search(r"\d{5,7}[.,]\d{1,3}", sec)
+        head = sec[: first_float.start()] if first_float else sec
+
+        # Nr kandidāti: skaitlis + iespējams » vai * vai -
+        nr_tokens = re.findall(r"\b(\d{1,7})\s*[»*\-]?\b", head)
+        nrs = []
+        for t in nr_tokens:
+            n = int(t)
+            if 1 <= n <= nr_max:
+                nrs.append(n)
+
+        # 2) savācam visus decimālskaitļus (gan X, gan Y)
+        float_tokens = re.findall(r"(\d{5,7}[.,]\d{1,3})", sec)
+        vals = [norm_float(v) for v in float_tokens]
+
+        # 3) sadalām X/Y pēc vērtības (šim plānu tipam X ~ 4xxk, Y ~ 5xxk..)
+        #    Robeža 500000 strādā uz tava 2010 PDF (X ~ 409-412k; Y ~ 596-598k)
+        xs = [v for v in vals if v < 500000 and x_min <= v <= x_max]
+        ys = [v for v in vals if v >= 500000 and y_min <= v <= y_max]
+
+        # 4) salāgojam pēc garuma (ņemam kopējo min)
+        m = min(len(nrs), len(xs), len(ys))
+        nrs, xs, ys = nrs[:m], xs[:m], ys[:m]
+
+        df = pd.DataFrame({"Nr": nrs, "X": xs, "Y": ys})
+
+        # unikāli pēc Nr (ja OCR atkārto)
+        df = df.drop_duplicates(subset=["Nr"]).sort_values("Nr").reset_index(drop=True)
+        return df
+
+    # ---------- B) RINDU REGEX (vecais) ----------
+    points = {}
+    for m in ROW_RE.finditer(text):
+        nr = int(m.group(1))
+        x = norm_float(m.group(2))
+        y = norm_float(m.group(3))
+
+        if not (x_min <= x <= x_max and y_min <= y <= y_max):
+            continue
+        if not (1 <= nr <= nr_max):
+            continue
+
+        points.setdefault(nr, (x, y))
+
+    df = pd.DataFrame(
+        [{"Nr": nr, "X": points[nr][0], "Y": points[nr][1]} for nr in sorted(points)]
+    )
+    return df
+
 
 st.title("PDF → Nr brīvie (OCR + tabula)")
 
