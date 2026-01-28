@@ -6,6 +6,7 @@ import pytesseract
 
 st.set_page_config(page_title="PDF → brīvie Nr", layout="wide")
 
+# Rindu regex (ja tabula OCR tekstā ir "Nr X Y" vienā rindā)
 ROW_RE = re.compile(
     r"(?:^|[^\d])(\d{1,7})\s*(?:\*{1,3}|»)?\s+"
     r"(\d{5,7}[.,]\d{1,3})\s+"
@@ -16,38 +17,25 @@ ROW_RE = re.compile(
 def norm_float(s: str) -> float:
     return float(s.replace(",", "."))
 
-def extract_points_from_text(text: str, x_min: float, x_max: float, y_min: float, y_max: float, nr_max: int):
-    points = {}
-    for m in ROW_RE.finditer(text):
-        nr = int(m.group(1))
-        x = norm_float(m.group(2))
-        y = norm_float(m.group(3))
-
-        if not (x_min <= x <= x_max and y_min <= y <= y_max):
-            continue
-        if not (1 <= nr <= nr_max):
-            continue
-
-        points.setdefault(nr, (x, y))
-
-    df = pd.DataFrame(
-        [{"Nr": nr, "X": points[nr][0], "Y": points[nr][1]} for nr in sorted(points)]
-    )
-    return df
-
-def extract_points_from_text(text: str, x_min: float, x_max: float, y_min: float, y_max: float, nr_max: int):
+def extract_points_from_text(
+    text: str,
+    x_min: float, x_max: float,
+    y_min: float, y_max: float,
+    nr_min: int, nr_max: int
+):
     """
     2 režīmi:
     A) Ja tekstā ir 'ROBEŽPUNKTU KOORDINĀTAS' -> kolonnu režīms (Nr saraksts + X saraksts + Y saraksts)
-    B) Citādi -> vecais "rindu regex" režīms
+    B) Citādi -> rindu regex režīms (Nr + X + Y vienā rindā)
     """
 
-    # ---------- A) KOLONNU REŽĪMS ----------
     key = "ROBEŽPUNKTU KOORDINĀTAS"
-      if key in text:
+
+    # ---------- A) KOLONNU REŽĪMS ----------
+    if key in text:
         sec = text.split(key, 1)[1]
 
-        # 1) Atrodam pirmo SKAITLI, kas izskatās pēc koordinātas (iekļaujas X/Y filtros)
+        # 1) atrodam pirmo reālo koordinātu (pēc X/Y filtra)
         coord_re = re.compile(r"\d{5,7}[.,]\d{1,3}")
         first_coord_pos = None
         for m in coord_re.finditer(sec):
@@ -58,32 +46,32 @@ def extract_points_from_text(text: str, x_min: float, x_max: float, y_min: float
 
         head = sec[:first_coord_pos] if first_coord_pos is not None else sec
 
-        # 2) Izvelkam Nr no "head" (ņemam arī gadījumus, kad OCR pazūd »)
-        #    Filtrs: Nr parasti nav milzīgs; ja jums ir lielāki Nr, pacel nr_max
+        # 2) Nr kandidāti tikai no "head"
         nr_tokens = re.findall(r"\b(\d{1,7})\b", head)
         nrs = []
         for t in nr_tokens:
             n = int(t)
-            if 1 <= n <= nr_max:
+            if nr_min <= n <= nr_max:
                 nrs.append(n)
 
-        # 3) Savācam VISAS koordinātu vērtības pēc pirmās koordinātas (nevis no sākuma)
+        # 3) Koordinātas pēc pirmās koordinātas
         tail = sec[first_coord_pos:] if first_coord_pos is not None else sec
         float_tokens = re.findall(r"(\d{5,7}[.,]\d{1,3})", tail)
         vals = [norm_float(v) for v in float_tokens]
 
-        # 4) Sadalam X/Y (šim tipam X ~ 4xxk, Y ~ 5xxk..)
+        # 4) X / Y sadalījums (tipiski LV plānos X ~ 3xx-4xxk, Y ~ 5xx-6xxk)
         xs = [v for v in vals if v < 500000 and x_min <= v <= x_max]
         ys = [v for v in vals if v >= 500000 and y_min <= v <= y_max]
 
-        # 5) Salāgojam (ņemam kopējo min garumu)
+        # 5) Salāgojam
         m = min(len(nrs), len(xs), len(ys))
         nrs, xs, ys = nrs[:m], xs[:m], ys[:m]
 
         df = pd.DataFrame({"Nr": nrs, "X": xs, "Y": ys})
         df = df.drop_duplicates(subset=["Nr"]).sort_values("Nr").reset_index(drop=True)
         return df
-    # ---------- B) RINDU REGEX (vecais) ----------
+
+    # ---------- B) RINDU REGEX (fallback) ----------
     points = {}
     for m in ROW_RE.finditer(text):
         nr = int(m.group(1))
@@ -92,7 +80,7 @@ def extract_points_from_text(text: str, x_min: float, x_max: float, y_min: float
 
         if not (x_min <= x <= x_max and y_min <= y <= y_max):
             continue
-        if not (1 <= nr <= nr_max):
+        if not (nr_min <= nr <= nr_max):
             continue
 
         points.setdefault(nr, (x, y))
@@ -102,6 +90,15 @@ def extract_points_from_text(text: str, x_min: float, x_max: float, y_min: float
     )
     return df
 
+def find_free_numbers(used, how_many=50):
+    used = set(used)
+    free = []
+    n = 1
+    while len(free) < how_many:
+        if n not in used:
+            free.append(n)
+        n += 1
+    return free
 
 st.title("PDF → Nr brīvie (OCR + tabula)")
 
@@ -116,6 +113,9 @@ with st.sidebar:
     x_max = st.number_input("X max", value=800000.0, step=1000.0)
     y_min = st.number_input("Y min", value=200000.0, step=1000.0)
     y_max = st.number_input("Y max", value=800000.0, step=1000.0)
+
+    st.subheader("Nr filtrs (noņem viltus 1..10 utt.)")
+    nr_min = st.number_input("Nr min", value=1, step=1)
     nr_max = st.number_input("Nr max", value=20000000, step=100000)
 
     st.subheader("Brīvie numuri")
@@ -141,7 +141,7 @@ if uploaded:
     text = "\n".join(all_text)
 
     st.info("3) Izvelk Nr, X, Y…")
-    df = extract_points_from_text(text, x_min, x_max, y_min, y_max, int(nr_max))
+    df = extract_points_from_text(text, x_min, x_max, y_min, y_max, int(nr_min), int(nr_max))
 
     c1, c2 = st.columns([2, 1])
     with c1:
@@ -161,4 +161,3 @@ if uploaded:
 
     with st.expander("Debug: OCR teksts (pirmais gabals)"):
         st.text(text[:4000])
-
