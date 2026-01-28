@@ -44,40 +44,45 @@ def extract_points_from_text(text: str, x_min: float, x_max: float, y_min: float
 
     # ---------- A) KOLONNU REŽĪMS ----------
     key = "ROBEŽPUNKTU KOORDINĀTAS"
-    if key in text:
+      if key in text:
         sec = text.split(key, 1)[1]
 
-        # 1) atrodam pirmo decimālskaitli -> līdz tam krājam Nr kandidātus
-        first_float = re.search(r"\d{5,7}[.,]\d{1,3}", sec)
-        head = sec[: first_float.start()] if first_float else sec
+        # 1) Atrodam pirmo SKAITLI, kas izskatās pēc koordinātas (iekļaujas X/Y filtros)
+        coord_re = re.compile(r"\d{5,7}[.,]\d{1,3}")
+        first_coord_pos = None
+        for m in coord_re.finditer(sec):
+            v = norm_float(m.group(0))
+            if (x_min <= v <= x_max) or (y_min <= v <= y_max):
+                first_coord_pos = m.start()
+                break
 
-        # Nr kandidāti: skaitlis + iespējams » vai * vai -
-        nr_tokens = re.findall(r"\b(\d{1,7})\s*[»*\-]?\b", head)
+        head = sec[:first_coord_pos] if first_coord_pos is not None else sec
+
+        # 2) Izvelkam Nr no "head" (ņemam arī gadījumus, kad OCR pazūd »)
+        #    Filtrs: Nr parasti nav milzīgs; ja jums ir lielāki Nr, pacel nr_max
+        nr_tokens = re.findall(r"\b(\d{1,7})\b", head)
         nrs = []
         for t in nr_tokens:
             n = int(t)
             if 1 <= n <= nr_max:
                 nrs.append(n)
 
-        # 2) savācam visus decimālskaitļus (gan X, gan Y)
-        float_tokens = re.findall(r"(\d{5,7}[.,]\d{1,3})", sec)
+        # 3) Savācam VISAS koordinātu vērtības pēc pirmās koordinātas (nevis no sākuma)
+        tail = sec[first_coord_pos:] if first_coord_pos is not None else sec
+        float_tokens = re.findall(r"(\d{5,7}[.,]\d{1,3})", tail)
         vals = [norm_float(v) for v in float_tokens]
 
-        # 3) sadalām X/Y pēc vērtības (šim plānu tipam X ~ 4xxk, Y ~ 5xxk..)
-        #    Robeža 500000 strādā uz tava 2010 PDF (X ~ 409-412k; Y ~ 596-598k)
+        # 4) Sadalam X/Y (šim tipam X ~ 4xxk, Y ~ 5xxk..)
         xs = [v for v in vals if v < 500000 and x_min <= v <= x_max]
         ys = [v for v in vals if v >= 500000 and y_min <= v <= y_max]
 
-        # 4) salāgojam pēc garuma (ņemam kopējo min)
+        # 5) Salāgojam (ņemam kopējo min garumu)
         m = min(len(nrs), len(xs), len(ys))
         nrs, xs, ys = nrs[:m], xs[:m], ys[:m]
 
         df = pd.DataFrame({"Nr": nrs, "X": xs, "Y": ys})
-
-        # unikāli pēc Nr (ja OCR atkārto)
         df = df.drop_duplicates(subset=["Nr"]).sort_values("Nr").reset_index(drop=True)
         return df
-
     # ---------- B) RINDU REGEX (vecais) ----------
     points = {}
     for m in ROW_RE.finditer(text):
